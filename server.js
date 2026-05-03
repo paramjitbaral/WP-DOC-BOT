@@ -14,7 +14,7 @@ const VERIFY_TOKEN = process.env.VERIFY_TOKEN || 'my_family_bot_secret';
 const WHATSAPP_TOKEN = process.env.WHATSAPP_TOKEN;
 const PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID;
 
-// Store temporary user selections in memory
+// Store temporary user selections and states in memory
 const userState = {};
 
 // Nicknames / Aliases mapping for family members
@@ -79,6 +79,78 @@ async function sendTextMessage(to, text) {
     }
 }
 
+async function sendMainMenu(to) {
+    const data = {
+        messaging_product: "whatsapp",
+        to: to,
+        type: "interactive",
+        interactive: {
+            type: "button",
+            header: { type: "text", text: "Main Menu" },
+            body: { text: "Welcome to the Family Doc Bot! 📁\n\nWhat would you like to do today?" },
+            action: {
+                buttons: [
+                    { type: "reply", reply: { id: "menu_view", title: "📂 View Documents" } },
+                    { type: "reply", reply: { id: "menu_add_user", title: "👤 Add Member" } },
+                    { type: "reply", reply: { id: "menu_upload", title: "📤 Upload Document" } }
+                ]
+            }
+        }
+    };
+
+    try {
+        await axios.post(`https://graph.facebook.com/v17.0/${PHONE_NUMBER_ID}/messages`, data, {
+            headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}` }
+        });
+    } catch (err) {
+        console.error('Error sending main menu:', err.response ? err.response.data : err.message);
+    }
+}
+
+async function sendMemberList(to, actionType) {
+    const docsFolder = path.join(__dirname, 'documents');
+    if (!fs.existsSync(docsFolder)) fs.mkdirSync(docsFolder);
+
+    const familyMembers = fs.readdirSync(docsFolder, { withFileTypes: true })
+        .filter(dirent => dirent.isDirectory())
+        .map(dirent => dirent.name);
+
+    if (familyMembers.length === 0) {
+        return sendTextMessage(to, "The documents folder is currently empty. Please use 'Add Member' first.");
+    }
+
+    let rows = familyMembers.map((member) => {
+        return {
+            id: `${actionType}_${member}`,
+            title: member.charAt(0).toUpperCase() + member.slice(1),
+            description: `Select to ${actionType === 'view' ? 'see' : 'upload for'} this member`
+        };
+    });
+
+    const data = {
+        messaging_product: "whatsapp",
+        to: to,
+        type: "interactive",
+        interactive: {
+            type: "list",
+            header: { type: "text", text: actionType === 'view' ? "Select a Member" : "Upload Destination" },
+            body: { text: actionType === 'view' ? "Choose a family member to see their files:" : "Which member's folder should this file go into?" },
+            action: {
+                button: "Choose Member",
+                sections: [{ title: "Family Members", rows: rows }]
+            }
+        }
+    };
+
+    try {
+        await axios.post(`https://graph.facebook.com/v17.0/${PHONE_NUMBER_ID}/messages`, data, {
+            headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}` }
+        });
+    } catch (err) {
+        console.error('Error sending member list:', err.response ? err.response.data : err.message);
+    }
+}
+
 async function sendListMessage(to, memberName, files) {
     let data;
 
@@ -89,7 +161,7 @@ async function sendListMessage(to, memberName, files) {
             return {
                 type: "reply",
                 reply: {
-                    id: parsedFile.name, // The unique ID
+                    id: `file_${parsedFile.name}`, // Prefixing to distinguish from menu buttons
                     title: parsedFile.name.substring(0, 20) // Max 20 chars
                 }
             };
@@ -111,7 +183,7 @@ async function sendListMessage(to, memberName, files) {
         let rows = files.map((file) => {
             const parsedFile = path.parse(file);
             return {
-                id: parsedFile.name,
+                id: `file_${parsedFile.name}`,
                 title: parsedFile.name.substring(0, 24),
                 description: `File Type: ${parsedFile.ext.toUpperCase().replace('.', '')}`.substring(0, 72)
             };
@@ -151,6 +223,7 @@ async function sendDocument(to, filePath, fileName) {
         if (ext === '.pdf') mime = 'application/pdf';
         else if (ext === '.jpg' || ext === '.jpeg') mime = 'image/jpeg';
         else if (ext === '.png') mime = 'image/png';
+        else if (ext === '.docx') mime = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
 
         // Step B: Upload file securely to Meta's servers
         const form = new FormData();
@@ -184,6 +257,36 @@ async function sendDocument(to, filePath, fileName) {
     }
 }
 
+async function downloadMedia(mediaId, savePath) {
+    try {
+        // 1. Get the download URL
+        const res = await axios.get(`https://graph.facebook.com/v17.0/${mediaId}`, {
+            headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}` }
+        });
+        const url = res.data.url;
+
+        // 2. Download the file
+        const response = await axios({
+            method: 'GET',
+            url: url,
+            responseType: 'stream',
+            headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}` }
+        });
+
+        // 3. Save to disk
+        const writer = fs.createWriteStream(savePath);
+        response.data.pipe(writer);
+
+        return new Promise((resolve, reject) => {
+            writer.on('finish', resolve);
+            writer.on('error', reject);
+        });
+    } catch (err) {
+        console.error('Error downloading media:', err.response ? err.response.data : err.message);
+        throw err;
+    }
+}
+
 // ---------------------------------------------------------
 // 2. RECEIVE MESSAGES FROM WHATSAPP
 // ---------------------------------------------------------
@@ -195,76 +298,137 @@ app.post('/webhook', async (req, res) => {
 
     if (body.object && body.entry && body.entry[0].changes && body.entry[0].changes[0].value.messages) {
         const msg = body.entry[0].changes[0].value.messages[0];
-        const senderPhone = msg.from; // User's phone number
+        const senderPhone = msg.from;
         
         // Ensure documents folder exists
         const docsFolder = path.join(__dirname, 'documents');
         if (!fs.existsSync(docsFolder)) fs.mkdirSync(docsFolder);
 
-        const familyMembers = fs.readdirSync(docsFolder, { withFileTypes: true })
-            .filter(dirent => dirent.isDirectory())
-            .map(dirent => dirent.name.toLowerCase());
+        // --- Handle Media Messages (Upload Flow) ---
+        if (msg.type === 'document' || msg.type === 'image') {
+            const state = userState[senderPhone];
+            if (state && state.action === 'awaiting_upload' && state.member) {
+                const mediaId = msg.type === 'document' ? msg.document.id : msg.image.id;
+                const fileName = msg.type === 'document' ? msg.document.filename : `image_${Date.now()}.jpg`;
+                const memberFolder = path.join(docsFolder, state.member);
+                const savePath = path.join(memberFolder, fileName);
 
-        // --- User sent a normal TEXT message ---
+                try {
+                    await sendTextMessage(senderPhone, `⏳ Uploading *${fileName}* to *${state.member.toUpperCase()}*...`);
+                    await downloadMedia(mediaId, savePath);
+                    await sendTextMessage(senderPhone, `✅ Successfully uploaded to *${state.member.toUpperCase()}*!`);
+                    delete userState[senderPhone]; // Reset state
+                    return sendMainMenu(senderPhone);
+                } catch (err) {
+                    return sendTextMessage(senderPhone, "❌ Failed to upload document. Please try again.");
+                }
+            } else {
+                return sendTextMessage(senderPhone, "Please select 'Upload Document' from the menu before sending a file.");
+            }
+        }
+
+        // --- Handle Text Messages ---
         if (msg.type === 'text') {
             const rawText = msg.text.body.trim().toLowerCase();
-            const text = nameAliases[rawText] || rawText;
+            const state = userState[senderPhone];
 
-            // Scenario A: Valid family member / nickname typed
+            // If we are waiting for a new member name
+            if (state && state.action === 'awaiting_member_name') {
+                const newMember = rawText.replace(/[^a-z0-9]/g, ''); // Clean name
+                if (!newMember) return sendTextMessage(senderPhone, "Invalid name. Please use only letters and numbers.");
+
+                const newPath = path.join(docsFolder, newMember);
+                if (fs.existsSync(newPath)) {
+                    return sendTextMessage(senderPhone, `The member *${newMember}* already exists! Try a different name.`);
+                }
+
+                fs.mkdirSync(newPath);
+                await sendTextMessage(senderPhone, `✅ Success! Member *${newMember.toUpperCase()}* has been added.\n\nYou can now upload documents for them.`);
+                delete userState[senderPhone];
+                return sendMainMenu(senderPhone);
+            }
+
+            // Normal text message (usually "hi" or a name)
+            const text = nameAliases[rawText] || rawText;
+            const familyMembers = fs.readdirSync(docsFolder, { withFileTypes: true })
+                .filter(dirent => dirent.isDirectory())
+                .map(dirent => dirent.name.toLowerCase());
+
             if (familyMembers.includes(text)) {
+                // Legacy support: if they just type a name, show documents
                 const memberFolder = path.join(docsFolder, text);
+                const files = fs.readdirSync(memberFolder).filter(file => {
+                    return !file.startsWith('.') && fs.statSync(path.join(memberFolder, file)).isFile();
+                });
+                userState[senderPhone] = { action: 'viewing', member: text };
+                return sendListMessage(senderPhone, text, files);
+            } else {
+                // Send Main Menu for any other text
+                return sendMainMenu(senderPhone);
+            }
+        }
+
+        // --- Handle Interactive Messages (Buttons/Lists) ---
+        if (msg.type === 'interactive') {
+            const reply = msg.interactive.type === 'list_reply' ? msg.interactive.list_reply : msg.interactive.button_reply;
+            const id = reply.id;
+
+            // 1. Main Menu Selections
+            if (id === 'menu_view') {
+                return sendMemberList(senderPhone, 'view');
+            }
+            if (id === 'menu_add_user') {
+                userState[senderPhone] = { action: 'awaiting_member_name' };
+                return sendTextMessage(senderPhone, "👤 *Add New Member*\n\nPlease type the name of the new family member (e.g., 'Swaraj'):");
+            }
+            if (id === 'menu_upload') {
+                return sendMemberList(senderPhone, 'upload');
+            }
+
+            // 2. Member List Selections (for viewing)
+            if (id.startsWith('view_')) {
+                const member = id.replace('view_', '');
+                const memberFolder = path.join(docsFolder, member);
                 const files = fs.readdirSync(memberFolder).filter(file => {
                     return !file.startsWith('.') && fs.statSync(path.join(memberFolder, file)).isFile();
                 });
 
                 if (files.length === 0) {
-                    return sendTextMessage(senderPhone, `The folder for *${text.toUpperCase()}* is currently empty.`);
+                    await sendTextMessage(senderPhone, `The folder for *${member.toUpperCase()}* is currently empty.`);
+                    return sendMainMenu(senderPhone);
                 }
 
-                // Remember their choice
-                userState[senderPhone] = text;
-                return sendListMessage(senderPhone, text, files);
-                
-            } else {
-                // Scenario B: Invalid name typed
-                if (familyMembers.length > 0) {
-                    const availableList = familyMembers.map(m => `- ${m}`).join('\n');
-                    sendTextMessage(senderPhone, `👋 Hello!\n\nI didn't recognize that name.\nAvailable main folders are:\n${availableList}\n\n(You can also use your nicknames!)\n\n👉 *Please type a name to view documents.*`);
+                userState[senderPhone] = { action: 'viewing', member: member };
+                return sendListMessage(senderPhone, member, files);
+            }
+
+            // 3. Member List Selections (for uploading)
+            if (id.startsWith('upload_')) {
+                const member = id.replace('upload_', '');
+                userState[senderPhone] = { action: 'awaiting_upload', member: member };
+                return sendTextMessage(senderPhone, `📤 *Upload to ${member.toUpperCase()}*\n\nPlease send the document or image now. You can send PDFs, Images, or DOCX files.`);
+            }
+
+            // 4. File Selection (Legacy and New)
+            if (id.startsWith('file_')) {
+                const selectedDocId = id.replace('file_', '');
+                const state = userState[senderPhone];
+                const currentMember = state ? state.member : null;
+
+                if (!currentMember) {
+                    return sendTextMessage(senderPhone, 'Session expired. Please select a member again.');
+                }
+
+                const memberFolder = path.join(docsFolder, currentMember);
+                const files = fs.readdirSync(memberFolder);
+                const matchedFile = files.find(f => path.parse(f).name === selectedDocId);
+
+                if (matchedFile) {
+                    const filePath = path.join(memberFolder, matchedFile);
+                    await sendDocument(senderPhone, filePath, matchedFile);
                 } else {
-                    sendTextMessage(senderPhone, `👋 Welcome! The documents folder is currently empty.`);
+                    sendTextMessage(senderPhone, '❌ Sorry, I could not find that document.');
                 }
-            }
-        }
-
-        // --- User clicked a button from the LIST menu or a DIRECT REPLY BUTTON ---
-        if (msg.type === 'interactive') {
-            let selectedDocId;
-            if (msg.interactive.type === 'list_reply') {
-                selectedDocId = msg.interactive.list_reply.id;
-            } else if (msg.interactive.type === 'button_reply') {
-                selectedDocId = msg.interactive.button_reply.id;
-            } else {
-                return; // Ignore other interactive types
-            }
-            const currentMember = userState[senderPhone];
-
-            if (!currentMember) {
-                return sendTextMessage(senderPhone, 'Session expired. Please type the family member name again.');
-            }
-
-            const memberFolder = path.join(docsFolder, currentMember);
-            if (!fs.existsSync(memberFolder)) return;
-
-            const files = fs.readdirSync(memberFolder);
-            
-            // Find the physical file that matches the ID (filename without extension)
-            const matchedFile = files.find(f => path.parse(f).name === selectedDocId);
-
-            if (matchedFile) {
-                const filePath = path.join(memberFolder, matchedFile);
-                await sendDocument(senderPhone, filePath, matchedFile);
-            } else {
-                sendTextMessage(senderPhone, '❌ Sorry, I could not find that document.');
             }
         }
     }
