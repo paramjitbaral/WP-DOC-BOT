@@ -17,6 +17,11 @@ const PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID;
 // Store temporary user selections and states in memory
 const userState = {};
 
+// GitHub Configuration
+const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
+const GITHUB_OWNER = process.env.GITHUB_OWNER;
+const GITHUB_REPO = process.env.GITHUB_REPO;
+
 // Nicknames / Aliases mapping for family members
 const nameAliases = {
     'nunu': 'paramjit',
@@ -39,32 +44,60 @@ const nameAliases = {
 };
 
 // ---------------------------------------------------------
-// 1. WEBHOOK VERIFICATION (Meta uses this to verify your server)
-// ---------------------------------------------------------
-
-// Health Check Route for UptimeRobot
-app.get('/', (req, res) => {
-    res.status(200).send('Bot is awake and running!');
-});
-
-app.get('/webhook', (req, res) => {
-    let mode = req.query['hub.mode'];
-    let token = req.query['hub.verify_token'];
-    let challenge = req.query['hub.challenge'];
-
-    if (mode && token) {
-        if (mode === 'subscribe' && token === VERIFY_TOKEN) {
-            console.log('✅ Webhook Verified by Meta!');
-            res.status(200).send(challenge);
-        } else {
-            res.sendStatus(403);
-        }
-    }
-});
-
-// ---------------------------------------------------------
 // Helper functions to send messages via Official API
 // ---------------------------------------------------------
+
+async function uploadToGithub(repoPath, localFilePath, commitMessage) {
+    const url = `https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/contents/${repoPath}`;
+    
+    try {
+        let sha;
+        // Check if file exists to get SHA (for overwriting)
+        try {
+            const checkRes = await axios.get(url, {
+                headers: { Authorization: `token ${GITHUB_TOKEN}` }
+            });
+            sha = checkRes.data.sha;
+        } catch (e) {
+            // File doesn't exist, ignore
+        }
+
+        const content = fs.readFileSync(localFilePath).toString('base64');
+        
+        await axios.put(url, {
+            message: commitMessage,
+            content: content,
+            sha: sha
+        }, {
+            headers: {
+                Authorization: `token ${GITHUB_TOKEN}`,
+                Accept: 'application/vnd.github.v3+json'
+            }
+        });
+        console.log(`✅ Successfully pushed ${repoPath} to GitHub`);
+    } catch (err) {
+        console.error('❌ GitHub Push Error:', err.response ? err.response.data : err.message);
+    }
+}
+
+async function uploadTextToGithub(repoPath, textContent, commitMessage) {
+    const url = `https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/contents/${repoPath}`;
+    
+    try {
+        const content = Buffer.from(textContent).toString('base64');
+        await axios.put(url, {
+            message: commitMessage,
+            content: content
+        }, {
+            headers: {
+                Authorization: `token ${GITHUB_TOKEN}`,
+                Accept: 'application/vnd.github.v3+json'
+            }
+        });
+    } catch (err) {
+        // Silently fail if folder already exists
+    }
+}
 async function sendTextMessage(to, text) {
     try {
         await axios.post(`https://graph.facebook.com/v17.0/${PHONE_NUMBER_ID}/messages`, {
@@ -85,14 +118,26 @@ async function sendMainMenu(to) {
         to: to,
         type: "interactive",
         interactive: {
-            type: "button",
+            type: "list",
             header: { type: "text", text: "Main Menu" },
             body: { text: "Welcome to the Family Doc Bot! 📁\n\nWhat would you like to do today?" },
             action: {
-                buttons: [
-                    { type: "reply", reply: { id: "menu_view", title: "📂 View Documents" } },
-                    { type: "reply", reply: { id: "menu_add_user", title: "👤 Add Member" } },
-                    { type: "reply", reply: { id: "menu_upload", title: "📤 Upload Document" } }
+                button: "Select Action",
+                sections: [
+                    {
+                        title: "Document Actions",
+                        rows: [
+                            { id: "menu_view", title: "📂 View Documents", description: "See and download files" },
+                            { id: "menu_upload", title: "📤 Upload Document", description: "Upload new files to a folder" }
+                        ]
+                    },
+                    {
+                        title: "Member Management",
+                        rows: [
+                            { id: "menu_add_user", title: "👤 Add Member", description: "Create a new family folder" },
+                            { id: "menu_delete_user", title: "🗑️ Delete Member", description: "Remove a member and their files" }
+                        ]
+                    }
                 ]
             }
         }
@@ -116,14 +161,19 @@ async function sendMemberList(to, actionType) {
         .map(dirent => dirent.name);
 
     if (familyMembers.length === 0) {
-        return sendTextMessage(to, "The documents folder is currently empty. Please use 'Add Member' first.");
+        return sendTextMessage(to, "The documents folder is currently empty.");
     }
 
     let rows = familyMembers.map((member) => {
+        let desc = "";
+        if (actionType === 'view') desc = "See files";
+        if (actionType === 'upload') desc = "Upload here";
+        if (actionType === 'delete') desc = "⚠️ DELETE THIS MEMBER";
+
         return {
             id: `${actionType}_${member}`,
             title: member.charAt(0).toUpperCase() + member.slice(1),
-            description: `Select to ${actionType === 'view' ? 'see' : 'upload for'} this member`
+            description: desc
         };
     });
 
@@ -133,8 +183,8 @@ async function sendMemberList(to, actionType) {
         type: "interactive",
         interactive: {
             type: "list",
-            header: { type: "text", text: actionType === 'view' ? "Select a Member" : "Upload Destination" },
-            body: { text: actionType === 'view' ? "Choose a family member to see their files:" : "Which member's folder should this file go into?" },
+            header: { type: "text", text: actionType === 'delete' ? "⚠️ Delete Member" : "Select a Member" },
+            body: { text: actionType === 'delete' ? "Select the member you want to PERMANENTLY remove:" : "Choose a family member:" },
             action: {
                 button: "Choose Member",
                 sections: [{ title: "Family Members", rows: rows }]
@@ -148,6 +198,30 @@ async function sendMemberList(to, actionType) {
         });
     } catch (err) {
         console.error('Error sending member list:', err.response ? err.response.data : err.message);
+    }
+}
+
+async function deleteFromGithub(repoPath, commitMessage) {
+    const url = `https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/contents/${repoPath}`;
+    try {
+        const res = await axios.get(url, {
+            headers: { Authorization: `token ${GITHUB_TOKEN}` }
+        });
+        
+        // If it's a file, delete it
+        if (!Array.isArray(res.data)) {
+            await axios.delete(url, {
+                headers: { Authorization: `token ${GITHUB_TOKEN}` },
+                data: { message: commitMessage, sha: res.data.sha }
+            });
+        } else {
+            // If it's a folder, delete everything inside recursively
+            for (const item of res.data) {
+                await deleteFromGithub(item.path, commitMessage);
+            }
+        }
+    } catch (err) {
+        // Ignore errors (file might not exist)
     }
 }
 
@@ -316,7 +390,12 @@ app.post('/webhook', async (req, res) => {
                 try {
                     await sendTextMessage(senderPhone, `⏳ Uploading *${fileName}* to *${state.member.toUpperCase()}*...`);
                     await downloadMedia(mediaId, savePath);
-                    await sendTextMessage(senderPhone, `✅ Successfully uploaded to *${state.member.toUpperCase()}*!`);
+                    
+                    // --- SYNC TO GITHUB ---
+                    const githubPath = `documents/${state.member}/${fileName}`;
+                    await uploadToGithub(githubPath, savePath, `Add document ${fileName} for ${state.member}`);
+                    
+                    await sendTextMessage(senderPhone, `✅ Successfully uploaded to *${state.member.toUpperCase()}* and synced to GitHub!`);
                     delete userState[senderPhone]; // Reset state
                     return sendMainMenu(senderPhone);
                 } catch (err) {
@@ -343,6 +422,11 @@ app.post('/webhook', async (req, res) => {
                 }
 
                 fs.mkdirSync(newPath);
+
+                // --- SYNC TO GITHUB (Create folder via .gitkeep) ---
+                const githubPath = `documents/${newMember}/.gitkeep`;
+                await uploadTextToGithub(githubPath, "placeholder", `Add member folder for ${newMember}`);
+
                 await sendTextMessage(senderPhone, `✅ Success! Member *${newMember.toUpperCase()}* has been added.\n\nYou can now upload documents for them.`);
                 delete userState[senderPhone];
                 return sendMainMenu(senderPhone);
@@ -384,6 +468,9 @@ app.post('/webhook', async (req, res) => {
             if (id === 'menu_upload') {
                 return sendMemberList(senderPhone, 'upload');
             }
+            if (id === 'menu_delete_user') {
+                return sendMemberList(senderPhone, 'delete');
+            }
 
             // 2. Member List Selections (for viewing)
             if (id.startsWith('view_')) {
@@ -409,7 +496,32 @@ app.post('/webhook', async (req, res) => {
                 return sendTextMessage(senderPhone, `📤 *Upload to ${member.toUpperCase()}*\n\nPlease send the document or image now. You can send PDFs, Images, or DOCX files.`);
             }
 
-            // 4. File Selection (Legacy and New)
+            // 4. Member List Selections (for deleting)
+            if (id.startsWith('delete_')) {
+                const member = id.replace('delete_', '');
+                const memberFolder = path.join(docsFolder, member);
+
+                try {
+                    await sendTextMessage(senderPhone, `🗑️ Deleting *${member.toUpperCase()}* and all their files...`);
+                    
+                    // Delete locally
+                    if (fs.existsSync(memberFolder)) {
+                        fs.rmSync(memberFolder, { recursive: true, force: true });
+                    }
+
+                    // Delete from GitHub
+                    const githubPath = `documents/${member}`;
+                    await deleteFromGithub(githubPath, `Delete member ${member} and files`);
+
+                    await sendTextMessage(senderPhone, `✅ Successfully deleted *${member.toUpperCase()}* from server and GitHub.`);
+                    return sendMainMenu(senderPhone);
+                } catch (err) {
+                    console.error('Error during deletion:', err);
+                    return sendTextMessage(senderPhone, "❌ Sorry, there was an error deleting that member.");
+                }
+            }
+
+            // 5. File Selection (Legacy and New)
             if (id.startsWith('file_')) {
                 const selectedDocId = id.replace('file_', '');
                 const state = userState[senderPhone];
