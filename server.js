@@ -28,17 +28,17 @@ const nameAliases = {
     'swaraj': 'paramjit',
     'beta': 'paramjit',
     'paramjit': 'paramjit',
-    
+
     'manu': 'prangyasha',
     'priti': 'prangyasha',
     'bate': 'prangyasha',
     'prangyasha': 'prangyasha',
-    
+
     'shikha': 'swarnaprava',
     'maa': 'swarnaprava',
     'swarna': 'swarnaprava',
     'swarnaprava': 'swarnaprava',
-    
+
     'papa': 'jitendra',
     'jitendra': 'jitendra'
 };
@@ -49,13 +49,13 @@ const nameAliases = {
 
 async function uploadToGithub(repoPath, localFilePath, commitMessage) {
     const url = `https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/contents/${repoPath}`;
-    
+
     try {
         let sha;
         // Check if file exists to get SHA (for overwriting)
         try {
             const checkRes = await axios.get(url, {
-                headers: { Authorization: `Bearer ${GITHUB_TOKEN}` }
+                headers: { Authorization: `token ${GITHUB_TOKEN}` }
             });
             sha = checkRes.data.sha;
         } catch (e) {
@@ -63,26 +63,26 @@ async function uploadToGithub(repoPath, localFilePath, commitMessage) {
         }
 
         const content = fs.readFileSync(localFilePath).toString('base64');
-        
+
         await axios.put(url, {
             message: commitMessage,
             content: content,
             sha: sha
         }, {
             headers: {
-                Authorization: `Bearer ${GITHUB_TOKEN}`,
+                Authorization: `token ${GITHUB_TOKEN}`,
                 Accept: 'application/vnd.github.v3+json'
             }
         });
-        console.log(`✅ GitHub Sync Success: ${repoPath}`);
+        console.log(`✅ Successfully pushed ${repoPath} to GitHub`);
     } catch (err) {
-        console.error('❌ GitHub Sync Error:', err.response ? JSON.stringify(err.response.data) : err.message);
+        console.error('❌ GitHub Push Error:', err.response ? err.response.data : err.message);
     }
 }
 
 async function uploadTextToGithub(repoPath, textContent, commitMessage) {
     const url = `https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/contents/${repoPath}`;
-    
+
     try {
         const content = Buffer.from(textContent).toString('base64');
         await axios.put(url, {
@@ -90,13 +90,12 @@ async function uploadTextToGithub(repoPath, textContent, commitMessage) {
             content: content
         }, {
             headers: {
-                Authorization: `Bearer ${GITHUB_TOKEN}`,
+                Authorization: `token ${GITHUB_TOKEN}`,
                 Accept: 'application/vnd.github.v3+json'
             }
         });
-        console.log(`✅ GitHub Folder Created: ${repoPath}`);
     } catch (err) {
-        console.error('❌ GitHub Folder Error:', err.response ? JSON.stringify(err.response.data) : err.message);
+        // Silently fail if folder already exists
     }
 }
 async function sendTextMessage(to, text) {
@@ -208,7 +207,7 @@ async function deleteFromGithub(repoPath, commitMessage) {
         const res = await axios.get(url, {
             headers: { Authorization: `token ${GITHUB_TOKEN}` }
         });
-        
+
         // If it's a file, delete it
         if (!Array.isArray(res.data)) {
             await axios.delete(url, {
@@ -309,7 +308,7 @@ async function sendDocument(to, filePath, fileName) {
         const uploadRes = await axios.post(`https://graph.facebook.com/v17.0/${PHONE_NUMBER_ID}/media`, form, {
             headers: { ...form.getHeaders(), Authorization: `Bearer ${WHATSAPP_TOKEN}` }
         });
-        
+
         const mediaId = uploadRes.data.id;
 
         // Step C: Send the uploaded media to the user
@@ -374,7 +373,7 @@ app.post('/webhook', async (req, res) => {
     if (body.object && body.entry && body.entry[0].changes && body.entry[0].changes[0].value.messages) {
         const msg = body.entry[0].changes[0].value.messages[0];
         const senderPhone = msg.from;
-        
+
         // Ensure documents folder exists
         const docsFolder = path.join(__dirname, 'documents');
         if (!fs.existsSync(docsFolder)) fs.mkdirSync(docsFolder);
@@ -391,11 +390,11 @@ app.post('/webhook', async (req, res) => {
                 try {
                     await sendTextMessage(senderPhone, `⏳ Uploading *${fileName}* to *${state.member.toUpperCase()}*...`);
                     await downloadMedia(mediaId, savePath);
-                    
+
                     // --- SYNC TO GITHUB ---
                     const githubPath = `documents/${state.member}/${fileName}`;
                     await uploadToGithub(githubPath, savePath, `Add document ${fileName} for ${state.member}`);
-                    
+
                     await sendTextMessage(senderPhone, `✅ Successfully uploaded to *${state.member.toUpperCase()}* and synced to GitHub!`);
                     delete userState[senderPhone]; // Reset state
                     return sendMainMenu(senderPhone);
@@ -504,7 +503,7 @@ app.post('/webhook', async (req, res) => {
 
                 try {
                     await sendTextMessage(senderPhone, `🗑️ Deleting *${member.toUpperCase()}* and all their files...`);
-                    
+
                     // Delete locally
                     if (fs.existsSync(memberFolder)) {
                         fs.rmSync(memberFolder, { recursive: true, force: true });
