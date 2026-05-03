@@ -29,10 +29,10 @@ const nameAliases = {
     'bate': 'prangyasha',
     'prangyasha': 'prangyasha',
     
-    'shikha': 'swarnaparav',
-    'maa': 'swarnaparav',
-    'swarna': 'swarnaparav',
-    'swarnaparav': 'swarnaparav',
+    'shikha': 'swarnaprava',
+    'maa': 'swarnaprava',
+    'swarna': 'swarnaprava',
+    'swarnaprava': 'swarnaprava',
     
     'papa': 'jitendra',
     'jitendra': 'jitendra'
