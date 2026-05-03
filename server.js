@@ -55,7 +55,7 @@ async function uploadToGithub(repoPath, localFilePath, commitMessage) {
         // Check if file exists to get SHA (for overwriting)
         try {
             const checkRes = await axios.get(url, {
-                headers: { Authorization: `token ${GITHUB_TOKEN}` }
+                headers: { Authorization: `Bearer ${GITHUB_TOKEN}` }
             });
             sha = checkRes.data.sha;
         } catch (e) {
@@ -70,13 +70,13 @@ async function uploadToGithub(repoPath, localFilePath, commitMessage) {
             sha: sha
         }, {
             headers: {
-                Authorization: `token ${GITHUB_TOKEN}`,
+                Authorization: `Bearer ${GITHUB_TOKEN}`,
                 Accept: 'application/vnd.github.v3+json'
             }
         });
-        console.log(`✅ Successfully pushed ${repoPath} to GitHub`);
+        console.log(`✅ GitHub Sync Success: ${repoPath}`);
     } catch (err) {
-        console.error('❌ GitHub Push Error:', err.response ? err.response.data : err.message);
+        console.error('❌ GitHub Sync Error:', err.response ? JSON.stringify(err.response.data) : err.message);
     }
 }
 
@@ -90,12 +90,13 @@ async function uploadTextToGithub(repoPath, textContent, commitMessage) {
             content: content
         }, {
             headers: {
-                Authorization: `token ${GITHUB_TOKEN}`,
+                Authorization: `Bearer ${GITHUB_TOKEN}`,
                 Accept: 'application/vnd.github.v3+json'
             }
         });
+        console.log(`✅ GitHub Folder Created: ${repoPath}`);
     } catch (err) {
-        // Silently fail if folder already exists
+        console.error('❌ GitHub Folder Error:', err.response ? JSON.stringify(err.response.data) : err.message);
     }
 }
 async function sendTextMessage(to, text) {
