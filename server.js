@@ -41,6 +41,12 @@ const nameAliases = {
 // ---------------------------------------------------------
 // 1. WEBHOOK VERIFICATION (Meta uses this to verify your server)
 // ---------------------------------------------------------
+
+// Health Check Route for UptimeRobot
+app.get('/', (req, res) => {
+    res.status(200).send('Bot is awake and running!');
+});
+
 app.get('/webhook', (req, res) => {
     let mode = req.query['hub.mode'];
     let token = req.query['hub.verify_token'];
