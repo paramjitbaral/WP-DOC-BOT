@@ -80,38 +80,66 @@ async function sendTextMessage(to, text) {
 }
 
 async function sendListMessage(to, memberName, files) {
-    // Format rows for the WhatsApp List Menu
-    let rows = files.map((file) => {
-        const parsedFile = path.parse(file);
-        return {
-            id: parsedFile.name, // The unique ID for the button
-            title: parsedFile.name.substring(0, 24), // Max 24 chars allowed
-            description: `File Type: ${parsedFile.ext.toUpperCase().replace('.', '')}`.substring(0, 72)
-        };
-    });
+    let data;
 
-    const data = {
-        messaging_product: "whatsapp",
-        to: to,
-        type: "interactive",
-        interactive: {
-            type: "list",
-            header: { type: "text", text: `${memberName.toUpperCase()}'s Documents` },
-            body: { text: "Please select a document to view:" },
-            footer: { text: "Family Bot" },
-            action: {
-                button: "View Documents",
-                sections: [{ title: "Available Files", rows: rows }]
+    // If 3 or fewer files, we can show them as direct buttons in the chat!
+    if (files.length <= 3) {
+        let buttons = files.map((file) => {
+            const parsedFile = path.parse(file);
+            return {
+                type: "reply",
+                reply: {
+                    id: parsedFile.name, // The unique ID
+                    title: parsedFile.name.substring(0, 20) // Max 20 chars
+                }
+            };
+        });
+
+        data = {
+            messaging_product: "whatsapp",
+            to: to,
+            type: "interactive",
+            interactive: {
+                type: "button",
+                header: { type: "text", text: `${memberName.toUpperCase()}'s Documents` },
+                body: { text: "Please tap a document below to view it:" },
+                action: { buttons: buttons }
             }
-        }
-    };
+        };
+    } else {
+        // If more than 3 files, WhatsApp forces us to use a List Menu
+        let rows = files.map((file) => {
+            const parsedFile = path.parse(file);
+            return {
+                id: parsedFile.name,
+                title: parsedFile.name.substring(0, 24),
+                description: `File Type: ${parsedFile.ext.toUpperCase().replace('.', '')}`.substring(0, 72)
+            };
+        });
+
+        data = {
+            messaging_product: "whatsapp",
+            to: to,
+            type: "interactive",
+            interactive: {
+                type: "list",
+                header: { type: "text", text: `${memberName.toUpperCase()}'s Documents` },
+                body: { text: "Please select a document from the menu to view it:" },
+                footer: { text: "Family Bot" },
+                action: {
+                    button: "View Documents",
+                    sections: [{ title: "Available Files", rows: rows }]
+                }
+            }
+        };
+    }
 
     try {
         await axios.post(`https://graph.facebook.com/v17.0/${PHONE_NUMBER_ID}/messages`, data, {
             headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}` }
         });
     } catch (err) {
-        console.error('Error sending list:', err.response ? err.response.data : err.message);
+        console.error('Error sending interactive msg:', err.response ? err.response.data : err.message);
     }
 }
 
@@ -208,9 +236,16 @@ app.post('/webhook', async (req, res) => {
             }
         }
 
-        // --- User clicked a button from the LIST menu ---
-        if (msg.type === 'interactive' && msg.interactive.type === 'list_reply') {
-            const selectedDocId = msg.interactive.list_reply.id;
+        // --- User clicked a button from the LIST menu or a DIRECT REPLY BUTTON ---
+        if (msg.type === 'interactive') {
+            let selectedDocId;
+            if (msg.interactive.type === 'list_reply') {
+                selectedDocId = msg.interactive.list_reply.id;
+            } else if (msg.interactive.type === 'button_reply') {
+                selectedDocId = msg.interactive.button_reply.id;
+            } else {
+                return; // Ignore other interactive types
+            }
             const currentMember = userState[senderPhone];
 
             if (!currentMember) {
