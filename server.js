@@ -8,6 +8,30 @@ const FormData = require('form-data');
 const app = express();
 app.use(express.json());
 
+// --- 1. MONITORING & VERIFICATION ROUTES ---
+
+// Root route for monitoring (Fixes "Down" status)
+app.get('/', (req, res) => {
+    res.send('Family Doc Bot is running! 🚀');
+});
+
+// Webhook Verification (Required by Meta)
+app.get('/webhook', (req, res) => {
+    const mode = req.query['hub.mode'];
+    const token = req.query['hub.verify_token'];
+    const challenge = req.query['hub.challenge'];
+
+    if (mode && token) {
+        if (mode === 'subscribe' && token === VERIFY_TOKEN) {
+            console.log('✅ Webhook Verified!');
+            res.status(200).send(challenge);
+        } else {
+            res.sendStatus(403);
+        }
+    }
+});
+
+
 // Load Environment Variables (Tokens from Meta)
 const PORT = process.env.PORT || 3000;
 const VERIFY_TOKEN = process.env.VERIFY_TOKEN || 'my_family_bot_secret';
@@ -44,8 +68,47 @@ const nameAliases = {
 };
 
 // ---------------------------------------------------------
-// Helper functions to send messages via Official API
+// Helper functions to sync and send messages
 // ---------------------------------------------------------
+
+async function syncFromGithub() {
+    console.log('🔄 Syncing documents from GitHub...');
+    const docsFolder = path.join(__dirname, 'documents');
+    if (!fs.existsSync(docsFolder)) fs.mkdirSync(docsFolder, { recursive: true });
+
+    async function downloadFolder(repoPath) {
+        try {
+            const url = `https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/contents/${repoPath}`;
+            const res = await axios.get(url, {
+                headers: { Authorization: `token ${GITHUB_TOKEN}` }
+            });
+
+            for (const item of res.data) {
+                const localPath = path.join(__dirname, item.path);
+                if (item.type === 'dir') {
+                    if (!fs.existsSync(localPath)) fs.mkdirSync(localPath, { recursive: true });
+                    await downloadFolder(item.path);
+                } else if (item.type === 'file' && item.name !== '.gitkeep') {
+                    if (!fs.existsSync(localPath)) {
+                        const fileRes = await axios.get(item.download_url, { responseType: 'stream' });
+                        const writer = fs.createWriteStream(localPath);
+                        fileRes.data.pipe(writer);
+                        await new Promise((resolve, reject) => {
+                            writer.on('finish', resolve);
+                            writer.on('error', reject);
+                        });
+                        console.log(`✅ Downloaded: ${item.path}`);
+                    }
+                }
+            }
+        } catch (err) {
+            // Silently fail if folder doesn't exist on GitHub yet
+        }
+    }
+
+    await downloadFolder('documents');
+    console.log('✨ Sync complete!');
+}
 
 async function uploadToGithub(repoPath, localFilePath, commitMessage) {
     const url = `https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/contents/${repoPath}`;
@@ -547,6 +610,11 @@ app.post('/webhook', async (req, res) => {
 });
 
 // Start the Cloud API Server
-app.listen(PORT, () => {
+app.listen(PORT, async () => {
     console.log(`🚀 Official Webhook Server is running on port ${PORT}`);
+    
+    // Sync documents from GitHub on startup so they aren't lost on Render
+    if (GITHUB_TOKEN && GITHUB_OWNER && GITHUB_REPO) {
+        await syncFromGithub();
+    }
 });
